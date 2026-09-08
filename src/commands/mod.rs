@@ -1,0 +1,21 @@
+pub mod alarm;
+pub mod authentication;
+pub mod backchannel;
+pub mod connection;
+pub mod file_management;
+pub mod monitoring;
+pub mod ptz;
+pub mod system_info;
+pub mod upgrade;
+pub mod user_management;
+
+pub use alarm::{Alarm, AlarmCallback};
+pub use authentication::Authentication;
+pub use backchannel::{AudioCodec, Backchannel};
+pub use connection::Connection;
+pub use file_management::FileManagement;
+pub use monitoring::{FrameCallback, FrameMetadata, Monitoring};
+pub use ptz::{PTZ, PTZCommand};
+pub use system_info::SystemInfo;
+pub use upgrade::{Upgrade, UpgradeProgressCallback};
+pub use user_management::UserManagement;
