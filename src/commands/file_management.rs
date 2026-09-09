@@ -34,6 +34,24 @@ pub trait FileManagement: Send + Sync {
         filename: &str,
         receiver: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) -> Result<()>;
+
+    /// Download by a real time range instead of a specific filename.
+    async fn download_file_by_time(
+        &self,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        channel: u8,
+        target_path: &str,
+    ) -> Result<()>;
+
+    /// Streaming counterpart of `download_file_by_time`
+    async fn stream_file_by_time(
+        &self,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        channel: u8,
+        receiver: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -303,6 +321,201 @@ impl FileManagement for DVRIPCam {
                     "StreamType": 0,
                     "TransMode": "TCP",
                     "Channel": 0,
+                    "Value": 0,
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1420, download_stop_data, false).await?;
+
+        Ok(())
+    }
+
+    async fn download_file_by_time(
+        &self,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        channel: u8,
+        target_path: &str,
+    ) -> Result<()> {
+        if let Some(parent) = Path::new(target_path).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let start_str = start_time.format("%Y-%m-%d %H:%M:%S").to_string();
+        let end_str = end_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Claim
+        let claim_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "Claim",
+                "Parameter": {
+                    "PlayMode": "ByTime",
+                    "FileName": "",
+                    "Channel": channel,
+                    "StreamType": 0,
+                    "Value": 0,
+                    "TransMode": "TCP",
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1424, claim_data, true).await?;
+
+        // Prepare stream listener
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let stream_ids = [0x1FC, 0x1FD, 0x1FA, 0x1F9, 0x5FC, 0x0592]; // Standard media + explicit stream ID
+        for &id in &stream_ids {
+            self.stream_handlers.insert(id, tx.clone());
+        }
+
+        // DownloadStart
+        let download_start_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "DownloadStart",
+                "Parameter": {
+                    "PlayMode": "ByTime",
+                    "FileName": "",
+                    "Channel": channel,
+                    "StreamType": 0,
+                    "Value": 0,
+                    "TransMode": "TCP",
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1420, download_start_data, false).await?;
+
+        // Receive data and write to file
+        let mut file = File::create(target_path).await?;
+
+        while let Some((header, data)) = rx.recv().await {
+            if header.data_len == 0 {
+                break;
+            }
+            file.write_all(&data).await?;
+        }
+        file.sync_all().await?;
+
+        // Cleanup handlers
+        for &id in &stream_ids {
+            self.stream_handlers.remove(&id);
+        }
+
+        // DownloadStop
+        let download_stop_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "DownloadStop",
+                "Parameter": {
+                    "FileName": "",
+                    "PlayMode": "ByTime",
+                    "StreamType": 0,
+                    "TransMode": "TCP",
+                    "Channel": channel,
+                    "Value": 0,
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1420, download_stop_data, false).await?;
+
+        Ok(())
+    }
+
+    async fn stream_file_by_time(
+        &self,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        channel: u8,
+        receiver: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> Result<()> {
+        let start_str = start_time.format("%Y-%m-%d %H:%M:%S").to_string();
+        let end_str = end_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Claim
+        let claim_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "Claim",
+                "Parameter": {
+                    "PlayMode": "ByTime",
+                    "FileName": "",
+                    "Channel": channel,
+                    "StreamType": 0,
+                    "Value": 0,
+                    "TransMode": "TCP",
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1424, claim_data, true).await?;
+
+        // Prepare stream listener
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let stream_ids = [0x1FC, 0x1FD, 0x1FA, 0x1F9, 0x5FC, 0x0592]; // Standard media + explicit stream ID
+        for &id in &stream_ids {
+            self.stream_handlers.insert(id, tx.clone());
+        }
+
+        // DownloadStart
+        let download_start_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "DownloadStart",
+                "Parameter": {
+                    "PlayMode": "ByTime",
+                    "FileName": "",
+                    "Channel": channel,
+                    "StreamType": 0,
+                    "Value": 0,
+                    "TransMode": "TCP",
+                },
+                "StartTime": start_str,
+                "EndTime": end_str,
+            },
+        });
+
+        self.send_command(1420, download_start_data, false).await?;
+
+        while let Some((header, data)) = rx.recv().await {
+            if header.data_len == 0 {
+                break;
+            }
+            receiver
+                .send(data)
+                .await
+                .map_err(|_| DVRIPError::Unknown("Failed to send".to_string()))?;
+        }
+
+        // Cleanup handlers
+        for &id in &stream_ids {
+            self.stream_handlers.remove(&id);
+        }
+
+        // DownloadStop
+        let download_stop_data = json!({
+            "Name": "OPPlayBack",
+            "OPPlayBack": {
+                "Action": "DownloadStop",
+                "Parameter": {
+                    "FileName": "",
+                    "PlayMode": "ByTime",
+                    "StreamType": 0,
+                    "TransMode": "TCP",
+                    "Channel": channel,
                     "Value": 0,
                 },
                 "StartTime": start_str,
