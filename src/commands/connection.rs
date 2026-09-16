@@ -56,20 +56,40 @@ impl Connection for DVRIPCam {
         let monitoring = Arc::clone(&self.alarm_monitoring);
         let video_monitoring = Arc::clone(&self.monitoring);
         let stream_handlers = Arc::clone(&self.stream_handlers);
+        let connected_for_reader = Arc::clone(&self.connected);
+        let message_handlers_cloned = message_handlers.clone();
 
         *self.recv_handle.lock().await = Some(tokio::spawn(async move {
             let alarm_info_code = QCODES.get("AlarmInfo").copied().unwrap_or(1504);
             loop {
                 let mut header = [0u8; 20];
-                read.read_exact(&mut header)
-                    .await
-                    .expect("Error reading packet header");
-                let decoded_header = PacketHeader::decode(&header).unwrap();
+                if let Err(e) = read.read_exact(&mut header).await {
+                    eprintln!("DVRIP: connection lost reading header ({e}); setting disconnected");
+                    connected_for_reader.store(false, Ordering::Release);
+                    stream_handlers.clear();
+                    message_handlers_cloned.clear();
+                    break;
+                }
+
+                let decoded_header = match PacketHeader::decode(&header) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("DVRIP: packet header corrupt ({e:?}); disconnecting");
+                        connected_for_reader.store(false, Ordering::Release);
+                        stream_handlers.clear();
+                        message_handlers_cloned.clear();
+                        break;
+                    }
+                };
 
                 let mut data = vec![0u8; decoded_header.data_len as usize];
-                read.read_exact(&mut data)
-                    .await
-                    .expect("Error reading packet data");
+                if let Err(e) = read.read_exact(&mut data).await {
+                    eprintln!("DVRIP: connection lost reading data ({e}); setting disconnected");
+                    connected_for_reader.store(false, Ordering::Release);
+                    stream_handlers.clear();
+                    message_handlers_cloned.clear();
+                    break;
+                }
 
                 if decoded_header.msg_id == 1412 && video_monitoring.load(Ordering::Acquire) {
                     DVRIPCam::__handle_video(frame_channel.clone(), data).await;
@@ -92,6 +112,10 @@ impl Connection for DVRIPCam {
                 }
             }
         }));
+
+        let connected_for_writer = Arc::clone(&self.connected);
+        let stream_handlers_for_writer = Arc::clone(&self.stream_handlers);
+        let message_handlers_for_writer = Arc::clone(&message_handlers);
 
         let (send, mut recv) = sync::mpsc::channel(100);
         self.send_pool = Arc::new(Some(send));
@@ -123,15 +147,33 @@ impl Connection for DVRIPCam {
                 }
 
                 // Send the packet
-                write
-                    .write_all(&header.encode())
-                    .await
-                    .expect("Error sending packet header. Cannot continue.");
-                write
-                    .write_all(&request.data)
-                    .await
-                    .expect("Error sending packet data. Cannot continue.");
-                write.flush().await.unwrap();
+                if let Err(e) = write.write_all(&header.encode()).await {
+                    eprintln!(
+                        "DVRIP: fallo escribiendo cabecera ({e}); marcando desconectado"
+                    );
+                    connected_for_writer.store(false, Ordering::Release);
+                    stream_handlers_for_writer.clear();
+                    message_handlers_for_writer.clear();
+                    break;
+                }
+                if let Err(e) = write.write_all(&request.data).await {
+                    eprintln!(
+                        "DVRIP: fallo escribiendo datos ({e}); marcando desconectado"
+                    );
+                    connected_for_writer.store(false, Ordering::Release);
+                    stream_handlers_for_writer.clear();
+                    message_handlers_for_writer.clear();
+                    break;
+                }
+                if let Err(e) = write.flush().await {
+                    eprintln!(
+                        "DVRIP: fallo haciendo flush ({e}); marcando desconectado"
+                    );
+                    connected_for_writer.store(false, Ordering::Release);
+                    stream_handlers_for_writer.clear();
+                    message_handlers_for_writer.clear();
+                    break;
+                }
 
                 if use_internal_counter {
                     packet_count += 1;

@@ -75,6 +75,7 @@ pub struct DVRIPCam {
     pub(crate) send_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     // Stream handlers for persistent listeners (e.g. file download)
+    #[allow(clippy::type_complexity)]
     pub(crate) stream_handlers: Arc<DashMap<u16, mpsc::Sender<(PacketHeader, Vec<u8>)>>>,
 
     // Configuration

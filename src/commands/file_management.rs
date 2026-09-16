@@ -1,10 +1,32 @@
 use crate::error::Result;
+use crate::protocol::PacketHeader;
 use crate::{DVRIPError, dvrip::DVRIPCam};
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::time::Duration;
 use tokio::{fs::File, io::AsyncWriteExt};
+
+async fn recv_stream_packet(
+    rx: &mut tokio::sync::mpsc::Receiver<(PacketHeader, Vec<u8>)>,
+    connected: &Arc<AtomicBool>,
+) -> Option<(PacketHeader, Vec<u8>)> {
+    loop {
+        tokio::select! {
+            biased;
+            msg = rx.recv() => return msg,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                if !connected.load(Ordering::Acquire) {
+                    return None;
+                }
+                // connected. waiting for data
+            }
+        }
+    }
+}
 
 #[async_trait]
 pub trait FileManagement: Send + Sync {
@@ -196,14 +218,21 @@ impl FileManagement for DVRIPCam {
 
         self.send_command(1420, download_start_data, false).await?;
 
-        while let Some((header, data)) = rx.recv().await {
+        let mut received_any = false;
+        while let Some((header, data)) = recv_stream_packet(&mut rx, &self.connected).await {
             if header.data_len == 0 {
-                break;
+                break; // explicit stream end
             }
+            received_any = true;
             receiver
                 .send(data)
                 .await
                 .map_err(|_| DVRIPError::Unknown("Failed to send".to_string()))?;
+        }
+        if !received_any {
+            return Err(DVRIPError::ConnectionError(
+                "no data received before connection was closed".to_string(),
+            ));
         }
 
         // Cleanup handlers
@@ -297,11 +326,19 @@ impl FileManagement for DVRIPCam {
         // Receive data and write to file
         let mut file = File::create(target_path).await?;
 
-        while let Some((header, data)) = rx.recv().await {
+        let mut received_any = false;
+        while let Some((header, data)) = recv_stream_packet(&mut rx, &self.connected).await {
             if header.data_len == 0 {
-                break;
+                break; // explicit stream end
             }
+            received_any = true;
             file.write_all(&data).await?;
+        }
+
+        if !received_any {
+            return Err(DVRIPError::ConnectionError(
+                "no data received before connection was closed".to_string(),
+            ));
         }
         file.sync_all().await?;
 
@@ -397,11 +434,19 @@ impl FileManagement for DVRIPCam {
         // Receive data and write to file
         let mut file = File::create(target_path).await?;
 
-        while let Some((header, data)) = rx.recv().await {
+        let mut received_any = false;
+        while let Some((header, data)) = recv_stream_packet(&mut rx, &self.connected).await {
             if header.data_len == 0 {
-                break;
+                break; // explicit stream end
             }
+            received_any = true;
             file.write_all(&data).await?;
+        }
+
+        if !received_any {
+            return Err(DVRIPError::ConnectionError(
+                "no data received before connection was closed".to_string(),
+            ));
         }
         file.sync_all().await?;
 
@@ -490,14 +535,21 @@ impl FileManagement for DVRIPCam {
 
         self.send_command(1420, download_start_data, false).await?;
 
-        while let Some((header, data)) = rx.recv().await {
+        let mut received_any = false;
+        while let Some((header, data)) = recv_stream_packet(&mut rx, &self.connected).await {
             if header.data_len == 0 {
-                break;
+                break; // explicit stream end
             }
+            received_any = true;
             receiver
                 .send(data)
                 .await
                 .map_err(|_| DVRIPError::Unknown("Failed to send".to_string()))?;
+        }
+        if !received_any {
+            return Err(DVRIPError::ConnectionError(
+                "no data received before connection was closed".to_string(),
+            ));
         }
 
         // Cleanup handlers
